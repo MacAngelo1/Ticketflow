@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: ticketflow
+      POSTGRES_PASSWORD: ticketflow_local
+      POSTGRES_DB: ticketflow
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - ticketflow_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ticketflow -d ticketflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+volumes:
+  ticketflow_data:
+

@@ -1,0 +1,16 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.local-postgres/
+*.log
+*.zip
+
+
+# Local study material
+CODE_WALKTHROUGH.md
+DEFENSE_GUIDE.md
+*Private-Study-Guide*
+private-notes/
