@@ -18,7 +18,8 @@ def log_confirmation(reservation_id):
         event = db.get(Event, order.event_id)
         tickets = db.scalars(select(Ticket).where(Ticket.reservation_id == order.id)).all()
         links = "\n".join(
-            f"  GET /tickets/{ticket.id}/qr (authenticated PNG download)" for ticket in tickets
+            f"  GET /tickets/{ticket.id}/qr (authenticated JSON containing base64 PNG)"
+            for ticket in tickets
         )
         logger.info(
             "\n[DEMO EMAIL - CONSOLE ONLY]\nTo: %s\nSubject: Tickets for %s\n"

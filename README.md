@@ -11,7 +11,7 @@ A REST API for event management, ticket reservations, seat selection, and admiss
 - Expiring reservations with idempotency keys.
 - PostgreSQL row locking to prevent overselling and seat conflicts.
 - Simulated payment, confirmation, and full-order refunds.
-- QR ticket downloads and single-use check-in.
+- QR ticket generation and single-use check-in.
 - Background console confirmation notifications.
 - Shared database-backed rate limits.
 - Organizer sales reports, platform reports, and admin audit logs.
@@ -127,7 +127,55 @@ Supported registration roles are `customer` and `organizer`. Login through `POST
 - `password`: the account password
 - `grant_type`: `password`
 
-In Swagger, use **Authorize** with the same email and password. Leave client ID and client secret empty. Protected requests require `Authorization: Bearer <access_token>`.
+Execute `POST /auth/token` first, using the email and password in its form fields. Copy `data.access_token` from the response. In Swagger, click **Authorize**, paste only that token (without the `Bearer` prefix), and click **Authorize**. Protected requests use `Authorization: Bearer <access_token>`.
+
+Login returns the same envelope as the other endpoints, so Swagger uses HTTP Bearer authorization instead of automatic OAuth2 password login. The token endpoint still accepts the same form input.
+
+## Response format
+
+Every application endpoint returns the same four top-level fields, including login, QR generation, validation failures, and other errors. Payloads that were previously returned directly now appear inside `data`. The JSON `status_code` matches the actual HTTP status; `success` is true for successful requests and false for errors.
+
+Successful registration (HTTP 201):
+
+```json
+{
+  "message": "User registered successfully.",
+  "data": {
+    "id": "00000000-0000-0000-0000-000000000001",
+    "email": "customer@example.com",
+    "full_name": "Customer",
+    "role": "customer",
+    "status": "active"
+  },
+  "status_code": 201,
+  "success": true
+}
+```
+
+Authentication failure (HTTP 401):
+
+```json
+{
+  "message": "Authentication required.",
+  "data": null,
+  "status_code": 401,
+  "success": false
+}
+```
+
+Validation errors place safe field details in `data.errors`, without echoing submitted passwords. List endpoints return arrays inside `data`. Authentication and rate-limit errors preserve `WWW-Authenticate` and `Retry-After` headers. Swagger HTML and the OpenAPI document retain their standard formats.
+
+### QR image responses
+
+`GET /tickets/{ticket_id}/qr` returns the envelope with `data.filename`, `data.media_type` (`image/png`), `data.encoding` (`base64`), and `data.content` (the base64-encoded PNG). Decode the content to recover the image.
+
+For example, save the endpoint's complete JSON response as `qr-response.json`, then run:
+
+```bash
+python -m uv run python -c 'import base64,json; from pathlib import Path; response=json.loads(Path("qr-response.json").read_text()); Path("ticket.png").write_bytes(base64.b64decode(response["data"]["content"], validate=True))'
+```
+
+This keeps QR generation inside the same response contract as the rest of the API.
 
 ## Purchase workflow
 
@@ -138,7 +186,7 @@ In Swagger, use **Authorize** with the same email and password. Leave client ID 
 5. A customer creates a reservation through `POST /reservations/`, providing an `Idempotency-Key` header.
 6. The customer calls `POST /reservations/{reservation_id}/pay-demo` with `{"outcome":"success"}`.
 7. The customer confirms through `POST /reservations/{reservation_id}/confirm`.
-8. Tickets are available through `GET /tickets/me`, with PNG downloads at `GET /tickets/{ticket_id}/qr`.
+8. Tickets are available through `GET /tickets/me`, with base64-encoded PNG data at `GET /tickets/{ticket_id}/qr`.
 
 Example reservation body, using actual ticket-type and seat IDs:
 
@@ -229,6 +277,7 @@ app/
   models.py          SQLAlchemy tables and constraints
   schemas.py         Request and response validation
   security.py        Password hashing and JWT dependencies
+  responses.py       Shared response envelope and helpers
   main.py            FastAPI application
   cli.py             Local administrative commands
 migrations/          Alembic schema revisions
@@ -242,7 +291,7 @@ tests/               PostgreSQL integration tests
 - A paid but unconfirmed order retains stock until confirmed or refunded.
 - Event-level locking prioritizes correctness but serializes writes for a single popular event.
 - The application uses NGN only and supports one ticket category per reservation.
-- QR images are generated on download; no email attachments are sent.
+- QR images are generated on request and returned as base64 within JSON; no email attachments are sent.
 - Audit logs provide application-level accountability, not tamper-proof storage.
 - Keep `.env`, virtual environments, and caches out of version control.
 

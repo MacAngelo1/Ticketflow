@@ -3,7 +3,7 @@ from uuid import UUID
 
 import jwt
 from fastapi import Depends, HTTPException
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pwdlib import PasswordHash
 from sqlalchemy.orm import Session
 
@@ -12,7 +12,10 @@ from app.database import get_db
 from app.models import User
 
 password_hasher = PasswordHash.recommended()
-oauth2 = OAuth2PasswordBearer(tokenUrl="/auth/token")
+bearer = HTTPBearer(
+    auto_error=False,
+    description="Log in at /auth/token, then paste data.access_token here (without the Bearer prefix).",
+)
 ALGORITHM = "HS256"
 
 
@@ -58,8 +61,13 @@ def decode_token(token, purpose):
         raise unauthorized()
 
 
-def current_user(token: str = Depends(oauth2), db: Session = Depends(get_db)):
-    user = db.get(User, decode_token(token, "access"))
+def current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+    db: Session = Depends(get_db),
+):
+    if credentials is None:
+        raise unauthorized("Authentication required.")
+    user = db.get(User, decode_token(credentials.credentials, "access"))
     if not user:
         raise unauthorized()
     if user.status != "active":

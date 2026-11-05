@@ -1,3 +1,4 @@
+from base64 import b64decode
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from threading import Barrier
@@ -24,14 +25,14 @@ def reserve(client, headers, item, seats=(), key="order-key-0001", quantity=1):
 def purchase(client, actors, item, seats=()):
     order = reserve(client, actors["buyer"], item, seats)
     assert order.status_code == 201, order.text
-    order_id = order.json()["id"]
+    order_id = order.json()["data"]["id"]
     payment = client.post(
         f"/reservations/{order_id}/pay-demo", headers=actors["buyer"], json={"outcome": "success"}
     )
     assert payment.status_code == 200, payment.text
     tickets = client.post(f"/reservations/{order_id}/confirm", headers=actors["buyer"])
     assert tickets.status_code == 200, tickets.text
-    return order_id, tickets.json()
+    return order_id, tickets.json()["data"]
 
 
 def test_auth_validation_and_roles(client, actors):
@@ -80,8 +81,8 @@ def test_event_moderation_and_ownership(client, actors, inventory):
     )
     assert client.get(f"/events/{event}/sales", headers=actors["buyer"]).status_code == 403
     updated = client.put(f"/events/{event}", headers=actors["owner"], json={"name": "Revised"})
-    assert updated.json()["status"] == "pending"
-    assert client.get("/events/").json() == []
+    assert updated.json()["data"]["status"] == "pending"
+    assert client.get("/events/").json()["data"] == []
     assert reserve(client, actors["buyer"], item).status_code == 409
     rejected = client.patch(
         f"/admin/events/{event}/moderation",
@@ -89,32 +90,34 @@ def test_event_moderation_and_ownership(client, actors, inventory):
         json={"status": "rejected", "reason": "Venue not confirmed."},
     )
     assert rejected.status_code == 200
-    assert client.get("/admin/audit-logs", headers=actors["admin"]).json()
+    assert client.get("/admin/audit-logs", headers=actors["admin"]).json()["data"]
 
 
 def test_purchase_retry_refund_and_qr(client, actors, inventory):
     event, item, seats = inventory()
     order_id, tickets = purchase(client, actors, item, [seats[0]])
     repeat = client.post(f"/reservations/{order_id}/confirm", headers=actors["buyer"])
-    assert repeat.json() == tickets
+    assert repeat.json()["data"] == tickets
     same = reserve(client, actors["buyer"], item, [seats[0]])
-    assert same.json()["id"] == order_id
+    assert same.json()["data"]["id"] == order_id
     assert reserve(client, actors["buyer"], item, [seats[1]]).status_code == 409
     assert reserve(client, actors["other"], item, [seats[0]]).status_code == 409
     qr = client.get(f"/tickets/{tickets[0]['id']}/qr", headers=actors["buyer"])
-    assert qr.status_code == 200 and qr.content.startswith(b"\x89PNG")
+    assert qr.status_code == 200 and b64decode(
+        qr.json()["data"]["content"], validate=True
+    ).startswith(b"\x89PNG")
     assert client.get(f"/tickets/{tickets[0]['id']}/qr", headers=actors["other"]).status_code == 403
     assert (
         client.post(f"/reservations/{order_id}/confirm", headers=actors["other"]).status_code == 403
     )
-    report = client.get("/admin/reports", headers=actors["admin"]).json()
+    report = client.get("/admin/reports", headers=actors["admin"]).json()["data"]
     assert float(report["net_sales"]) == 1500.50
     refund = client.post(
         f"/admin/reservations/{order_id}/refund",
         headers=actors["admin"],
         json={"reason": "Customer requested cancellation."},
     )
-    assert refund.json()["status"] == "refunded"
+    assert refund.json()["data"]["status"] == "refunded"
     assert (
         client.post(
             f"/admin/reservations/{order_id}/refund",
@@ -125,12 +128,15 @@ def test_purchase_retry_refund_and_qr(client, actors, inventory):
     )
     assert client.get(f"/tickets/{tickets[0]['id']}/qr", headers=actors["buyer"]).status_code == 409
     assert reserve(client, actors["other"], item, [seats[0]]).status_code == 201
-    assert float(client.get("/admin/reports", headers=actors["admin"]).json()["net_sales"]) == 0
+    assert (
+        float(client.get("/admin/reports", headers=actors["admin"]).json()["data"]["net_sales"])
+        == 0
+    )
 
 
 def test_expiry_and_failed_payment(client, actors, inventory):
     _, item, _ = inventory(False, quantity=1)
-    order = reserve(client, actors["buyer"], item).json()
+    order = reserve(client, actors["buyer"], item).json()["data"]
     assert (
         client.post(f"/reservations/{order['id']}/confirm", headers=actors["buyer"]).status_code
         == 409
@@ -195,13 +201,15 @@ def test_seat_validation_and_cancel(client, actors, inventory):
     )
     _, other_item, other_seats = inventory()
     assert reserve(client, actors["buyer"], item, other_seats[:1]).status_code == 422
-    order = reserve(client, actors["buyer"], item, seats[:1]).json()
+    order = reserve(client, actors["buyer"], item, seats[:1]).json()["data"]
     assert (
         client.post(f"/reservations/{order['id']}/cancel", headers=actors["other"]).status_code
         == 403
     )
     assert (
-        client.post(f"/reservations/{order['id']}/cancel", headers=actors["buyer"]).json()["status"]
+        client.post(f"/reservations/{order['id']}/cancel", headers=actors["buyer"]).json()["data"][
+            "status"
+        ]
         == "cancelled"
     )
     assert reserve(client, actors["other"], item, seats[:1]).status_code == 201
@@ -220,8 +228,8 @@ def test_check_in_replay_and_refund_used_ticket(client, actors, inventory):
     )
     assert (
         client.post("/tickets/check-in", headers=actors["owner"], json={"qr_token": token}).json()[
-            "status"
-        ]
+            "data"
+        ]["status"]
         == "used"
     )
     assert (
@@ -242,7 +250,7 @@ def test_check_in_replay_and_refund_used_ticket(client, actors, inventory):
 
 def test_suspended_account_and_event(client, actors, inventory):
     event, item, seats = inventory()
-    user_id = client.get("/auth/me", headers=actors["buyer"]).json()["id"]
+    user_id = client.get("/auth/me", headers=actors["buyer"]).json()["data"]["id"]
     suspended = client.patch(
         f"/admin/users/{user_id}/status",
         headers=actors["admin"],
@@ -269,7 +277,7 @@ def test_rate_limit_and_demo_disable(client, actors, inventory, monkeypatch):
     blocked = reserve(client, actors["buyer"], item, key="rate-key-last")
     assert blocked.status_code == 429 and int(blocked.headers["Retry-After"]) > 0
     monkeypatch.setattr(get_settings(), "demo_payments_enabled", False)
-    order_id = client.get("/reservations/me", headers=actors["buyer"]).json()[0]["id"]
+    order_id = client.get("/reservations/me", headers=actors["buyer"]).json()["data"][0]["id"]
     assert (
         client.post(
             f"/reservations/{order_id}/pay-demo",

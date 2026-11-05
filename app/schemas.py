@@ -167,3 +167,12 @@ class UserStatus(Reason):
 
 class CheckIn(Input):
     qr_token: str = Field(min_length=10, max_length=2000)
+
+
+class AuditOut(Output):
+    id: int
+    actor_id: UUID
+    action: str
+    target: str
+    reason: str
+    created_at: datetime

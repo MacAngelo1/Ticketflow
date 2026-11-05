@@ -1,14 +1,16 @@
+from base64 import b64encode
 from datetime import timedelta
 from io import BytesIO
 from uuid import UUID
 
 import qrcode
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Event, Reservation, Ticket, User
+from app.responses import ApiResponse, success_response
 from app.schemas import CheckIn, DemoPayment, ReservationOut, Reserve, TicketOut
 from app.security import current_user, decode_token, organizer, sign_token
 from app.services.common import audit, event_or_404, require_owner
@@ -19,7 +21,7 @@ from app.services.rate_limit import limit
 router = APIRouter(tags=["Reservations and tickets"])
 
 
-@router.post("/reservations/", response_model=ReservationOut, status_code=201)
+@router.post("/reservations/", response_model=ApiResponse[ReservationOut], status_code=201)
 def create_reservation(
     body: Reserve,
     idempotency_key: str = Header(min_length=8, max_length=100),
@@ -27,10 +29,14 @@ def create_reservation(
     db: Session = Depends(get_db),
 ):
     limit(f"reserve:{user.id}", 5)
-    return reserve(db, user, body, idempotency_key)
+    return success_response(
+        "Reservation retrieved or created successfully.",
+        reserve(db, user, body, idempotency_key),
+        status_code=201,
+    )
 
 
-@router.get("/reservations/me", response_model=list[ReservationOut])
+@router.get("/reservations/me", response_model=ApiResponse[list[ReservationOut]])
 def my_orders(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
@@ -51,10 +57,10 @@ def my_orders(
         if view.status == "reserved" and view.expires_at <= now:
             view.status = "expired"
         result.append(view)
-    return result
+    return success_response("Your reservations retrieved successfully.", result)
 
 
-@router.post("/reservations/{reservation_id}/pay-demo", response_model=ReservationOut)
+@router.post("/reservations/{reservation_id}/pay-demo", response_model=ApiResponse[ReservationOut])
 def pay(
     reservation_id: UUID,
     body: DemoPayment,
@@ -62,10 +68,12 @@ def pay(
     db: Session = Depends(get_db),
 ):
     limit(f"pay:{user.id}", 10)
-    return demo_pay(db, reservation_id, user, body.outcome)
+    return success_response(
+        "Payment processed successfully.", demo_pay(db, reservation_id, user, body.outcome)
+    )
 
 
-@router.post("/reservations/{reservation_id}/confirm", response_model=list[TicketOut])
+@router.post("/reservations/{reservation_id}/confirm", response_model=ApiResponse[list[TicketOut]])
 def confirm_order(
     reservation_id: UUID,
     background: BackgroundTasks,
@@ -75,10 +83,10 @@ def confirm_order(
     tickets, newly_confirmed = confirm(db, reservation_id, user)
     if newly_confirmed:
         background.add_task(log_confirmation, reservation_id)
-    return tickets
+    return success_response("Reservation confirmed successfully.", tickets)
 
 
-@router.post("/reservations/{reservation_id}/cancel", response_model=ReservationOut)
+@router.post("/reservations/{reservation_id}/cancel", response_model=ApiResponse[ReservationOut])
 def cancel_order(
     reservation_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)
 ):
@@ -88,27 +96,30 @@ def cancel_order(
     if order.status == "reserved":
         order.status = "cancelled"
     db.commit()
-    return order
+    return success_response("Reservation cancellation processed.", order)
 
 
-@router.get("/tickets/me", response_model=list[TicketOut])
+@router.get("/tickets/me", response_model=ApiResponse[list[TicketOut]])
 def my_tickets(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
 ):
-    return db.scalars(
-        select(Ticket)
-        .join(Reservation)
-        .where(Reservation.user_id == user.id)
-        .order_by(Ticket.id)
-        .offset(offset)
-        .limit(limit)
-    ).all()
+    return success_response(
+        "Your tickets retrieved successfully.",
+        db.scalars(
+            select(Ticket)
+            .join(Reservation)
+            .where(Reservation.user_id == user.id)
+            .order_by(Ticket.id)
+            .offset(offset)
+            .limit(limit)
+        ).all(),
+    )
 
 
-@router.get("/tickets/{ticket_id}/qr", responses={200: {"content": {"image/png": {}}}})
+@router.get("/tickets/{ticket_id}/qr", response_model=ApiResponse)
 def ticket_qr(ticket_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)):
     ticket = db.get(Ticket, ticket_id)
     if not ticket:
@@ -125,14 +136,18 @@ def ticket_qr(ticket_id: UUID, user: User = Depends(current_user), db: Session =
     qr_token = sign_token(ticket.id, "ticket", expires)
     buffer = BytesIO()
     qrcode.make(qr_token).save(buffer, format="PNG")
-    return Response(
-        buffer.getvalue(),
-        media_type="image/png",
-        headers={"Content-Disposition": f'attachment; filename="ticket-{ticket.id}.png"'},
+    return success_response(
+        "Ticket QR code generated successfully.",
+        {
+            "filename": f"ticket-{ticket.id}.png",
+            "media_type": "image/png",
+            "encoding": "base64",
+            "content": b64encode(buffer.getvalue()).decode("ascii"),
+        },
     )
 
 
-@router.post("/tickets/check-in", response_model=TicketOut)
+@router.post("/tickets/check-in", response_model=ApiResponse[TicketOut])
 def check_in(body: CheckIn, user: User = Depends(organizer), db: Session = Depends(get_db)):
     ticket_id = decode_token(body.qr_token, "ticket")
     initial = db.get(Ticket, ticket_id)
@@ -160,4 +175,4 @@ def check_in(body: CheckIn, user: User = Depends(organizer), db: Session = Depen
     if user.role == "admin":
         audit(db, user, "ticket.check_in", ticket.id, "Admin checked ticket at entry.")
     db.commit()
-    return ticket
+    return success_response("Ticket checked in successfully.", ticket)

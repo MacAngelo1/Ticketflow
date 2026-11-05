@@ -22,12 +22,22 @@ from app.main import app
 from app.models import User
 
 
+def check_response_contract(response):
+    response.read()
+    body = response.json()
+    assert set(body) == {"message", "data", "status_code", "success"}
+    assert isinstance(body["message"], str) and body["message"]
+    assert body["status_code"] == response.status_code
+    assert body["success"] is (200 <= response.status_code < 300)
+
+
 @pytest.fixture
 def client():
     with engine.begin() as connection:
         names = ", ".join('"' + table.name + '"' for table in Base.metadata.sorted_tables)
         connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
     with TestClient(app) as test_client:
+        test_client.event_hooks["response"].append(check_response_contract)
         yield test_client
 
 
@@ -50,11 +60,11 @@ def actors(client):
             },
         )
         assert response.status_code == 201, response.text
-        assert "password_hash" not in response.json()
+        assert "password_hash" not in response.json()["data"]
         token = client.post(
             "/auth/token", data={"username": f"{name}@example.com", "password": "Password123!"}
         )
-        result[name] = {"Authorization": "Bearer " + token.json()["access_token"]}
+        result[name] = {"Authorization": "Bearer " + token.json()["data"]["access_token"]}
     with SessionLocal.begin() as db:
         db.scalar(select(User).where(User.email == "admin@example.com")).role = "admin"
     return result
@@ -74,14 +84,14 @@ def inventory(client, actors):
             },
         )
         assert event.status_code == 201, event.text
-        event_id = event.json()["id"]
+        event_id = event.json()["data"]["id"]
         item = client.post(
             f"/events/{event_id}/ticket-types",
             headers=actors["owner"],
             json={"name": "Regular", "price": "1500.50", "quantity": quantity},
         )
         assert item.status_code == 201, item.text
-        item_id = item.json()["id"]
+        item_id = item.json()["data"]["id"]
         seats = []
         if seated:
             response = client.post(
@@ -90,7 +100,7 @@ def inventory(client, actors):
                 json={"ticket_type_id": item_id, "labels": [f"A{i + 1}" for i in range(quantity)]},
             )
             assert response.status_code == 201, response.text
-            seats = [seat["id"] for seat in response.json()]
+            seats = [seat["id"] for seat in response.json()["data"]]
         approved = client.patch(
             f"/admin/events/{event_id}/moderation",
             headers=actors["admin"],
